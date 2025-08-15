@@ -10,8 +10,10 @@ For now it's only able to:
 - Put the shutter on ventilation when it's stopped
 
 When checking out there is one file missing "config.h". This file must be created after checking out and it should contain the following two items:
+```c
 #define WIFI_SSID "THE_SSID_TO_CONNECT_TO"
 #define WIFI_PASS "THE_PASSWORD_FOR_THAT_SSID"
+```
 
 ## PCB
 The PCB was created in KiCad. It's a free opensource program for creating schematics and PCB's.
