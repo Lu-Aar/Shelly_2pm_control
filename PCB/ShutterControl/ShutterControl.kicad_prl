@@ -59,7 +59,7 @@
     "ssh_key": ""
   },
   "meta": {
-    "filename": "PlugControl.kicad_prl",
+    "filename": "ShutterControl.kicad_prl",
     "version": 5
   },
   "net_inspector_panel": {
