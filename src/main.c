@@ -5,6 +5,7 @@
 #include "esp_log.h"
 #include "esp_http_client.h"
 #include "esp_sleep.h"
+#include "esp_pm.h"
 #include "nvs_flash.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -16,8 +17,8 @@
 #include "ShutterControl.h"
 #include "config.h"
 
-
-struct netif* esp_netif_get_netif_impl(esp_netif_t* esp_netif);
+// #define DEBUG
+struct netif *esp_netif_get_netif_impl(esp_netif_t *esp_netif);
 
 #define ESP_MAXIMUM_RETRY 5
 
@@ -42,33 +43,41 @@ const uint8_t SHUTTER_MAC_2[] = {0xE4, 0xB3, 0x23, 0x1F, 0xFA, 0xAC};
 
 volatile int triggered_button = -1;
 
-void IRAM_ATTR button_isr_handler(void* arg)
+void IRAM_ATTR button_isr_handler(void *arg)
 {
     triggered_button = (int)(intptr_t)arg;
 }
 
 void init(void);
 
-static void event_handler(void* arg, esp_event_base_t event_base,
-                                int32_t event_id, void* event_data)
+static void event_handler(void *arg, esp_event_base_t event_base,
+                          int32_t event_id, void *event_data)
 {
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START)
+    {
         esp_wifi_connect();
-    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        if (s_retry_num < ESP_MAXIMUM_RETRY) {
+    }
+    else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED)
+    {
+        if (s_retry_num < ESP_MAXIMUM_RETRY)
+        {
             esp_wifi_connect();
             s_retry_num++;
 #ifdef DEBUG
             ESP_LOGI("WIFI", "retry to connect to the AP");
 #endif
-        } else {
+        }
+        else
+        {
             xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
         }
 #ifdef DEBUG
-        ESP_LOGI("WIFI","connect to the AP fail");
+        ESP_LOGI("WIFI", "connect to the AP fail");
 #endif
-    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
-        ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
+    }
+    else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP)
+    {
+        ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
 #ifdef DEBUG
         ESP_LOGI("WIFI", "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
 #endif
@@ -77,16 +86,16 @@ static void event_handler(void* arg, esp_event_base_t event_base,
     }
 }
 
-ip4_addr_t find_shutter_ip(const uint8_t* shutter_mac)
+ip4_addr_t find_shutter_ip(const uint8_t *shutter_mac)
 {
     ip4_addr_t result_ip;
     IP4_ADDR(&result_ip, 255, 255, 255, 255);
 
-    esp_netif_t* netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
     esp_netif_ip_info_t ip_info;
     esp_netif_get_ip_info(netif, &ip_info);
 
-    struct netif* lwip_netif = esp_netif_get_netif_impl(netif);
+    struct netif *lwip_netif = esp_netif_get_netif_impl(netif);
 
     for (int ii = START_IP; ii <= END_IP; ++ii)
     {
@@ -104,12 +113,12 @@ ip4_addr_t find_shutter_ip(const uint8_t* shutter_mac)
 #endif
         }
         vTaskDelay(pdMS_TO_TICKS(50));
-    
+
         if ((ii % 10 == 0) || (ii == END_IP - 1))
         {
-            struct eth_addr* mac;
-            struct netif* netif_out;
-            ip4_addr_t* ip_out;
+            struct eth_addr *mac;
+            struct netif *netif_out;
+            ip4_addr_t *ip_out;
 
             for (int jj = 0; jj < 10; ++jj)
             {
@@ -118,8 +127,8 @@ ip4_addr_t find_shutter_ip(const uint8_t* shutter_mac)
                     if (memcmp(mac->addr, shutter_mac, 6) == 0)
                     {
 #ifdef DEBUG
-                    ESP_LOGI("SHUTTER", "Found MAC: " MACSTR " for IP: " IPSTR,
-                            mac->addr[0], mac->addr[1], mac->addr[2], mac->addr[3], mac->addr[4], mac->addr[5], IP2STR(ip_out));
+                        ESP_LOGI("SHUTTER", "Found MAC: " MACSTR " for IP: " IPSTR,
+                                 mac->addr[0], mac->addr[1], mac->addr[2], mac->addr[3], mac->addr[4], mac->addr[5], IP2STR(ip_out));
 #endif
                         return *ip_out;
                         break;
@@ -134,7 +143,8 @@ ip4_addr_t find_shutter_ip(const uint8_t* shutter_mac)
 void wait_for_wifi_connected()
 {
     // Wait until WIFI_CONNECTED_BIT is set
-    while (!(xEventGroupGetBits(s_wifi_event_group) & WIFI_CONNECTED_BIT)) {
+    while (!(xEventGroupGetBits(s_wifi_event_group) & WIFI_CONNECTED_BIT))
+    {
         vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
@@ -143,15 +153,16 @@ void ESPSleep(void)
 {
 #ifdef DEBUG
     ESP_LOGI("SLEEP", "Going to light sleep now");
-    esp_log_level_set("*", ESP_LOG_NONE);
+//     esp_log_level_set("*", ESP_LOG_NONE);
 #endif
     esp_light_sleep_start();
-#ifdef DEBUG
-    esp_log_level_set("*", ESP_LOG_INFO);
-#endif
+    // #ifdef DEBUG
+    //     esp_log_level_set("*", ESP_LOG_INFO);
+    // #endif
 }
 
-void app_main() {
+void app_main()
+{
     init();
 
     gpio_config_t io_conf = {
@@ -162,9 +173,9 @@ void app_main() {
     };
     gpio_config(&io_conf);
     gpio_install_isr_service(0);
-    gpio_isr_handler_add(BUTTON_UP, button_isr_handler, (void*) BUTTON_UP);
-    gpio_isr_handler_add(BUTTON_STOP, button_isr_handler, (void*) BUTTON_STOP);
-    gpio_isr_handler_add(BUTTON_DOWN, button_isr_handler, (void*) BUTTON_DOWN);
+    gpio_isr_handler_add(BUTTON_UP, button_isr_handler, (void *)BUTTON_UP);
+    gpio_isr_handler_add(BUTTON_STOP, button_isr_handler, (void *)BUTTON_STOP);
+    gpio_isr_handler_add(BUTTON_DOWN, button_isr_handler, (void *)BUTTON_DOWN);
     gpio_wakeup_enable(BUTTON_UP, GPIO_INTR_LOW_LEVEL);
     gpio_wakeup_enable(BUTTON_STOP, GPIO_INTR_LOW_LEVEL);
     gpio_wakeup_enable(BUTTON_DOWN, GPIO_INTR_LOW_LEVEL);
@@ -172,15 +183,16 @@ void app_main() {
     ip4_addr_t shutter1_ip = find_shutter_ip(SHUTTER_MAC_1);
     ip4_addr_t shutter2_ip = find_shutter_ip(SHUTTER_MAC_2);
 #ifdef DEBUG
-    ESP_LOGI("SHUTTER", "Shutter IP: " IPSTR, IP2STR(&shutter1_ip));
+    ESP_LOGI("SHUTTER", "Shutter1 IP: " IPSTR, IP2STR(&shutter1_ip));
+    ESP_LOGI("SHUTTER", "Shutter2 IP: " IPSTR, IP2STR(&shutter2_ip));
 #endif
-    
+
     esp_sleep_enable_gpio_wakeup();
 
     const TickType_t awake_time = pdMS_TO_TICKS(5000); // e.g. 5 seconds awake
     TickType_t last_wake = xTaskGetTickCount();
 
-    while(1)
+    while (1)
     {
         if ((xTaskGetTickCount() - last_wake) > awake_time)
         {
@@ -200,13 +212,14 @@ void app_main() {
             shutter1_ip = find_shutter_ip(SHUTTER_MAC_1);
             shutter2_ip = find_shutter_ip(SHUTTER_MAC_2);
 #ifdef DEBUG
-            ESP_LOGI("SHUTTER", "Shutter IP: " IPSTR, IP2STR(&shutter_ip));
+            ESP_LOGI("SHUTTER", "Shutter IP: " IPSTR, IP2STR(&shutter1_ip));
+            ESP_LOGI("SHUTTER", "Shutter IP: " IPSTR, IP2STR(&shutter2_ip));
 #endif
         }
-
-
-        switch(triggered_button)
+        else
         {
+            switch (triggered_button)
+            {
             case BUTTON_UP:
                 OpenShutter(shutter1_ip);
                 OpenShutter(shutter2_ip);
@@ -215,7 +228,8 @@ void app_main() {
                 enum ShutterStatus state1 = GetShutterStatus(shutter1_ip);
                 enum ShutterStatus state2 = GetShutterStatus(shutter2_ip);
 #ifdef DEBUG
-                ESP_LOGI("STATUS", "The shutter status is: %d", state);
+                ESP_LOGI("STATUS", "The shutter status is: %d", state1);
+                ESP_LOGI("STATUS", "The shutter status is: %d", state2);
 #endif
                 if (state1 == SHUTTER_STATUS_OPENING || state1 == SHUTTER_STATUS_CLOSING)
                 {
@@ -241,8 +255,8 @@ void app_main() {
                 break;
             default:
                 break;
+            }
         }
-
         triggered_button = -1;
         vTaskDelay(pdMS_TO_TICKS(10));
     }
@@ -287,9 +301,10 @@ void wifi_init_sta(void)
             // .sae_h2e_identifier = EXAMPLE_H2E_IDENTIFIER,
         },
     };
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA) );
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config) );
-    ESP_ERROR_CHECK(esp_wifi_start() );
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+    ESP_ERROR_CHECK(esp_wifi_start());
+    esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
 
 #ifdef DEBUG
     ESP_LOGI("WIFI", "wifi_init_sta finished.");
@@ -298,21 +313,26 @@ void wifi_init_sta(void)
     /* Waiting until either the connection is established (WIFI_CONNECTED_BIT) or connection failed for the maximum
      * number of re-tries (WIFI_FAIL_BIT). The bits are set by event_handler() (see above) */
     EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
-            WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
-            pdFALSE,
-            pdFALSE,
-            portMAX_DELAY);
+                                           WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
+                                           pdFALSE,
+                                           pdFALSE,
+                                           portMAX_DELAY);
 
     /* xEventGroupWaitBits() returns the bits before the call returned, hence we can test which event actually
      * happened. */
 #ifdef DEBUG
-    if (bits & WIFI_CONNECTED_BIT) {
+    if (bits & WIFI_CONNECTED_BIT)
+    {
         ESP_LOGI("WIFI", "connected to ap SSID:%s",
-                 ESP_WIFI_SSID);
-    } else if (bits & WIFI_FAIL_BIT) {
+                 WIFI_SSID);
+    }
+    else if (bits & WIFI_FAIL_BIT)
+    {
         ESP_LOGI("WIFI", "Failed to connect to SSID:%s",
-                 ESP_WIFI_SSID);
-    } else {
+                 WIFI_SSID);
+    }
+    else
+    {
         ESP_LOGE("WIFI", "UNEXPECTED EVENT");
     }
 #endif
@@ -337,4 +357,9 @@ void init()
     ESP_LOGI("WIFI", "ESP_WIFI_MODE_STA");
 #endif
     wifi_init_sta();
+    esp_pm_config_t pm_config = {
+        .max_freq_mhz = 80,
+        .min_freq_mhz = 10,
+        .light_sleep_enable = true};
+    esp_pm_configure(&pm_config);
 }
