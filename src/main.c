@@ -14,13 +14,15 @@
 #include "lwip/ip_addr.h"
 #include "lwip/netif.h"
 #include "driver/gpio.h"
+#include "soc/gpio_reg.h"
+#include "soc/io_mux_reg.h"
 #include "ShutterControl.h"
 #include "config.h"
 
 // #define DEBUG
 struct netif *esp_netif_get_netif_impl(esp_netif_t *esp_netif);
 
-#define ESP_MAXIMUM_RETRY 5
+#define ESP_MAXIMUM_RETRY 10
 
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAIL_BIT BIT1
@@ -35,18 +37,13 @@ struct netif *esp_netif_get_netif_impl(esp_netif_t *esp_netif);
 
 #define MACSTR "%02x:%02x:%02x:%02x:%02x:%02x"
 
+#define AWAKE_TIME_MS 20000
+
 static EventGroupHandle_t s_wifi_event_group;
 static int s_retry_num = 0;
 
 const uint8_t SHUTTER_MAC_1[] = {0xE4, 0xB3, 0x23, 0x23, 0x4B, 0x1C};
 const uint8_t SHUTTER_MAC_2[] = {0xE4, 0xB3, 0x23, 0x1F, 0xFA, 0xAC};
-
-volatile int triggered_button = -1;
-
-void IRAM_ATTR button_isr_handler(void *arg)
-{
-    triggered_button = (int)(intptr_t)arg;
-}
 
 void init(void);
 
@@ -86,7 +83,35 @@ static void event_handler(void *arg, esp_event_base_t event_base,
     }
 }
 
-ip4_addr_t find_shutter_ip(const uint8_t *shutter_mac)
+void DisableUnusedPins(void)
+{
+    gpio_config_t io_conf_0 = {
+        .intr_type = GPIO_INTR_DISABLE,
+        .mode = GPIO_MODE_OUTPUT,
+        .pin_bit_mask = (1ULL << GPIO_NUM_0),
+    };
+    gpio_config(&io_conf_0);
+    gpio_set_level(GPIO_NUM_0, 0);
+
+    gpio_config_t io_conf_rest = {
+        .intr_type = GPIO_INTR_DISABLE,
+        .mode = GPIO_MODE_INPUT,
+        .pin_bit_mask = (1ULL << GPIO_NUM_1) |
+                        (1ULL << GPIO_NUM_2) |
+                        (1ULL << GPIO_NUM_6) |
+                        (1ULL << GPIO_NUM_7) |
+                        (1ULL << GPIO_NUM_8) |
+                        (1ULL << GPIO_NUM_9) |
+                        (1ULL << GPIO_NUM_10) |
+                        (1ULL << GPIO_NUM_20) |
+                        (1ULL << GPIO_NUM_21),
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+    };
+    gpio_config(&io_conf_rest);
+}
+
+ip4_addr_t RequestIp(const uint8_t *shutter_mac)
 {
     ip4_addr_t result_ip;
     IP4_ADDR(&result_ip, 255, 255, 255, 255);
@@ -140,124 +165,185 @@ ip4_addr_t find_shutter_ip(const uint8_t *shutter_mac)
     return result_ip;
 }
 
-void wait_for_wifi_connected()
-{
-    // Wait until WIFI_CONNECTED_BIT is set
-    while (!(xEventGroupGetBits(s_wifi_event_group) & WIFI_CONNECTED_BIT))
-    {
-        vTaskDelay(pdMS_TO_TICKS(100));
-    }
-}
-
 void ESPSleep(void)
 {
 #ifdef DEBUG
-    ESP_LOGI("SLEEP", "Going to light sleep now");
-//     esp_log_level_set("*", ESP_LOG_NONE);
+    ESP_LOGI("SLEEP", "Going to sleep now");
 #endif
-    esp_light_sleep_start();
-    // #ifdef DEBUG
-    //     esp_log_level_set("*", ESP_LOG_INFO);
-    // #endif
+    DisableUnusedPins();
+    esp_wifi_stop();
+    esp_wifi_deinit();
+    esp_deep_sleep_start();
 }
 
-void app_main()
+void setup_wakeup()
 {
-    init();
+    const uint64_t wakeup_pins = 1 << BUTTON_UP | 1 << BUTTON_STOP | 1 << BUTTON_DOWN;
+    esp_deep_sleep_enable_gpio_wakeup(wakeup_pins, ESP_GPIO_WAKEUP_GPIO_LOW);
+}
 
-    gpio_config_t io_conf = {
-        .intr_type = GPIO_INTR_NEGEDGE,
-        .mode = GPIO_MODE_INPUT,
-        .pin_bit_mask = (1ULL << BUTTON_UP) | (1ULL << BUTTON_STOP) | (1ULL << BUTTON_DOWN),
-        // .pull_up_en = GPIO_PULLUP_ENABLE,
-    };
-    gpio_config(&io_conf);
-    gpio_install_isr_service(0);
-    gpio_isr_handler_add(BUTTON_UP, button_isr_handler, (void *)BUTTON_UP);
-    gpio_isr_handler_add(BUTTON_STOP, button_isr_handler, (void *)BUTTON_STOP);
-    gpio_isr_handler_add(BUTTON_DOWN, button_isr_handler, (void *)BUTTON_DOWN);
-    gpio_wakeup_enable(BUTTON_UP, GPIO_INTR_LOW_LEVEL);
-    gpio_wakeup_enable(BUTTON_STOP, GPIO_INTR_LOW_LEVEL);
-    gpio_wakeup_enable(BUTTON_DOWN, GPIO_INTR_LOW_LEVEL);
+void GetIps(ip4_addr_t *pShutter1_ip, ip4_addr_t *pShutter2_ip)
+{
+    nvs_handle_t handle;
+    nvs_open("storage", NVS_READWRITE, &handle);
+    esp_err_t err1 = nvs_get_u32(handle, "ip1", &pShutter1_ip->addr);
+    esp_err_t err2 = nvs_get_u32(handle, "ip2", &pShutter2_ip->addr);
+    if (err1 == ESP_ERR_NVS_NOT_FOUND)
+    {
+        *pShutter1_ip = RequestIp(SHUTTER_MAC_1);
+        nvs_set_u32(handle, "ip1", pShutter1_ip->addr);
+#ifdef DEBUG
+        ESP_LOGI("NVM", "Saved shutter1 IP");
+#endif
+    }
+    if (err2 == ESP_ERR_NVS_NOT_FOUND)
+    {
+        *pShutter2_ip = RequestIp(SHUTTER_MAC_2);
+        nvs_set_u32(handle, "ip2", pShutter2_ip->addr);
+#ifdef DEBUG
+        ESP_LOGI("NVM", "Saved shutter2 IP");
+#endif
+    }
+    if (err1 == ESP_ERR_NVS_NOT_FOUND || err2 == ESP_ERR_NVS_NOT_FOUND)
+    {
+        nvs_commit(handle);
+    }
+    nvs_close(handle);
 
-    ip4_addr_t shutter1_ip = find_shutter_ip(SHUTTER_MAC_1);
-    ip4_addr_t shutter2_ip = find_shutter_ip(SHUTTER_MAC_2);
 #ifdef DEBUG
     ESP_LOGI("SHUTTER", "Shutter1 IP: " IPSTR, IP2STR(&shutter1_ip));
     ESP_LOGI("SHUTTER", "Shutter2 IP: " IPSTR, IP2STR(&shutter2_ip));
 #endif
+}
 
-    esp_sleep_enable_gpio_wakeup();
+void SetIps(ip4_addr_t shutter1_ip, ip4_addr_t shutter2_ip)
+{
+    nvs_handle_t handle;
+    nvs_open("storage", NVS_READWRITE, &handle);
+    nvs_set_u32(handle, "ip1", shutter1_ip.addr);
+    nvs_set_u32(handle, "ip2", shutter2_ip.addr);
+    nvs_commit(handle);
+    nvs_close(handle);
 
-    const TickType_t awake_time = pdMS_TO_TICKS(5000); // e.g. 5 seconds awake
+#ifdef DEBUG
+    ESP_LOGI("SHUTTER", "Shutter1 IP: " IPSTR, IP2STR(&shutter1_ip));
+    ESP_LOGI("SHUTTER", "Shutter2 IP: " IPSTR, IP2STR(&shutter2_ip));
+#endif
+}
+
+void Open(ip4_addr_t ip1, ip4_addr_t ip2)
+{
+    OpenShutter(ip1);
+    OpenShutter(ip2);
+}
+
+void Stop(ip4_addr_t ip1, ip4_addr_t ip2)
+{
+    enum ShutterStatus state1 = GetShutterStatus(ip1);
+    enum ShutterStatus state2 = GetShutterStatus(ip2);
+#ifdef DEBUG
+    ESP_LOGI("STATUS", "The shutter status is: %d", state1);
+    ESP_LOGI("STATUS", "The shutter status is: %d", state2);
+#endif
+    if (state1 == SHUTTER_STATUS_OPENING || state1 == SHUTTER_STATUS_CLOSING)
+    {
+        StopShutter(ip1);
+    }
+    else if (state1 == SHUTTER_STATUS_STOPPED || state1 == SHUTTER_STATUS_OPEN || state1 == SHUTTER_STATUS_CLOSED)
+    {
+        SetShutterPosition(ip1, SHUTTER_VENTILATION);
+    }
+
+    if (state2 == SHUTTER_STATUS_OPENING || state2 == SHUTTER_STATUS_CLOSING)
+    {
+        StopShutter(ip2);
+    }
+    else if (state2 == SHUTTER_STATUS_STOPPED || state2 == SHUTTER_STATUS_OPEN || state2 == SHUTTER_STATUS_CLOSED)
+    {
+        SetShutterPosition(ip2, SHUTTER_VENTILATION);
+    }
+}
+
+void Close(ip4_addr_t ip1, ip4_addr_t ip2)
+{
+    CloseShutter(ip1);
+    CloseShutter(ip2);
+}
+
+void app_main()
+{
+    int gpioStates = REG_READ(GPIO_IN_REG);
+    int buttonUpState = !((gpioStates >> BUTTON_UP) & 1);
+    int buttonStopState = !((gpioStates >> BUTTON_STOP) & 1);
+    int buttonDownState = !((gpioStates >> BUTTON_DOWN) & 1);
+    init();
+#ifdef DEBUG
+    ESP_LOGI("BUTTON", "Button UP state: %d", buttonUpState);
+    ESP_LOGI("BUTTON", "Button STOP state: %d", buttonStopState);
+    ESP_LOGI("BUTTON", "Button DOWN state: %d", buttonDownState);
+#endif
+
+    gpio_config_t io_conf = {
+        .intr_type = GPIO_INTR_DISABLE,
+        .mode = GPIO_MODE_INPUT,
+        .pin_bit_mask = (1ULL << BUTTON_UP) | (1ULL << BUTTON_STOP) | (1ULL << BUTTON_DOWN),
+    };
+    gpio_config(&io_conf);
+    setup_wakeup();
+
+    ip4_addr_t shutter1_ip;
+    ip4_addr_t shutter2_ip;
+    GetIps(&shutter1_ip, &shutter2_ip);
+
+    const TickType_t awake_time = pdMS_TO_TICKS(AWAKE_TIME_MS);
     TickType_t last_wake = xTaskGetTickCount();
 
     while (1)
     {
+        if (!buttonUpState && !buttonStopState && !buttonDownState)
+        {
+            gpioStates = REG_READ(GPIO_IN_REG);
+            buttonUpState = !((gpioStates >> BUTTON_UP) & 1);
+            buttonStopState = !((gpioStates >> BUTTON_STOP) & 1);
+            buttonDownState = !((gpioStates >> BUTTON_DOWN) & 1);
+        }
+        if (buttonUpState || buttonStopState || buttonDownState)
+        {
+            last_wake = xTaskGetTickCount();
+        }
+
         if ((xTaskGetTickCount() - last_wake) > awake_time)
         {
             ESPSleep();
         }
-        if (triggered_button != -1)
-        {
-#ifdef DEBUG
-            ESP_LOGI("BUTTON", "Button %d pressed", triggered_button);
-#endif
-            wait_for_wifi_connected();
-            last_wake = xTaskGetTickCount();
-        }
 
-        if (gpio_get_level(BUTTON_UP) == 0 && gpio_get_level(BUTTON_DOWN) == 0)
+        if (buttonUpState && buttonDownState)
         {
-            shutter1_ip = find_shutter_ip(SHUTTER_MAC_1);
-            shutter2_ip = find_shutter_ip(SHUTTER_MAC_2);
-#ifdef DEBUG
-            ESP_LOGI("SHUTTER", "Shutter IP: " IPSTR, IP2STR(&shutter1_ip));
-            ESP_LOGI("SHUTTER", "Shutter IP: " IPSTR, IP2STR(&shutter2_ip));
-#endif
+            shutter1_ip = RequestIp(SHUTTER_MAC_1);
+            shutter2_ip = RequestIp(SHUTTER_MAC_2);
+            SetIps(shutter1_ip, shutter2_ip);
+
+            buttonUpState = 0;
+            buttonDownState = 0;
         }
         else
         {
-            switch (triggered_button)
+            if (buttonUpState)
             {
-            case BUTTON_UP:
-                OpenShutter(shutter1_ip);
-                OpenShutter(shutter2_ip);
-                break;
-            case BUTTON_STOP:
-                enum ShutterStatus state1 = GetShutterStatus(shutter1_ip);
-                enum ShutterStatus state2 = GetShutterStatus(shutter2_ip);
-#ifdef DEBUG
-                ESP_LOGI("STATUS", "The shutter status is: %d", state1);
-                ESP_LOGI("STATUS", "The shutter status is: %d", state2);
-#endif
-                if (state1 == SHUTTER_STATUS_OPENING || state1 == SHUTTER_STATUS_CLOSING)
-                {
-                    StopShutter(shutter1_ip);
-                }
-                else if (state1 == SHUTTER_STATUS_STOPPED || state1 == SHUTTER_STATUS_OPEN || state1 == SHUTTER_STATUS_CLOSED)
-                {
-                    SetShutterPosition(shutter1_ip, SHUTTER_VENTILATION);
-                }
-
-                if (state2 == SHUTTER_STATUS_OPENING || state2 == SHUTTER_STATUS_CLOSING)
-                {
-                    StopShutter(shutter2_ip);
-                }
-                else if (state2 == SHUTTER_STATUS_STOPPED || state2 == SHUTTER_STATUS_OPEN || state2 == SHUTTER_STATUS_CLOSED)
-                {
-                    SetShutterPosition(shutter2_ip, SHUTTER_VENTILATION);
-                }
-                break;
-            case BUTTON_DOWN:
-                CloseShutter(shutter1_ip);
-                CloseShutter(shutter2_ip);
-                break;
-            default:
-                break;
+                Open(shutter1_ip, shutter2_ip);
+                buttonUpState = 0;
+            }
+            if (buttonStopState)
+            {
+                Stop(shutter1_ip, shutter2_ip);
+                buttonStopState = 0;
+            }
+            if (buttonDownState)
+            {
+                Close(shutter1_ip, shutter2_ip);
+                buttonDownState = 0;
             }
         }
-        triggered_button = -1;
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
@@ -290,37 +376,21 @@ void wifi_init_sta(void)
     wifi_config_t wifi_config = {
         .sta = {
             .ssid = WIFI_SSID,
-            .password = WIFI_PASS,
-            /* Authmode threshold resets to WPA2 as default if password matches WPA2 standards (password len => 8).
-             * If you want to connect the device to deprecated WEP/WPA networks, Please set the threshold value
-             * to WIFI_AUTH_WEP/WIFI_AUTH_WPA_PSK and set the password with length and format matching to
-             * WIFI_AUTH_WEP/WIFI_AUTH_WPA_PSK standards.
-             */
-            .threshold.authmode = ESP_WIFI_SCAN_AUTH_MODE_THRESHOLD,
-            // .sae_pwe_h2e = ESP_WIFI_SAE_MODE,
-            // .sae_h2e_identifier = EXAMPLE_H2E_IDENTIFIER,
-        },
+            .password = WIFI_PASS},
     };
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
-    esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+    esp_wifi_connect();
 
-#ifdef DEBUG
-    ESP_LOGI("WIFI", "wifi_init_sta finished.");
-#endif
-
-    /* Waiting until either the connection is established (WIFI_CONNECTED_BIT) or connection failed for the maximum
-     * number of re-tries (WIFI_FAIL_BIT). The bits are set by event_handler() (see above) */
     EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
                                            WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
                                            pdFALSE,
                                            pdFALSE,
                                            portMAX_DELAY);
 
-    /* xEventGroupWaitBits() returns the bits before the call returned, hence we can test which event actually
-     * happened. */
 #ifdef DEBUG
+    ESP_LOGI("WIFI", "wifi_init_sta finished.");
     if (bits & WIFI_CONNECTED_BIT)
     {
         ESP_LOGI("WIFI", "connected to ap SSID:%s",
@@ -349,17 +419,12 @@ void init()
     }
     ESP_ERROR_CHECK(ret);
 
+#ifdef DEBUG
     if (CONFIG_LOG_MAXIMUM_LEVEL > CONFIG_LOG_DEFAULT_LEVEL)
     {
         esp_log_level_set("wifi", CONFIG_LOG_MAXIMUM_LEVEL);
     }
-#ifdef DEBUG
     ESP_LOGI("WIFI", "ESP_WIFI_MODE_STA");
 #endif
     wifi_init_sta();
-    esp_pm_config_t pm_config = {
-        .max_freq_mhz = 80,
-        .min_freq_mhz = 10,
-        .light_sleep_enable = true};
-    esp_pm_configure(&pm_config);
 }
